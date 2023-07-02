@@ -1,0 +1,11 @@
+https://youtu.be/w5gN_CLC1Jw - presentation link
+simple NN generate - has the NN class and the optimized 
+iris train - the code to genetically train the iris classifier
+iris dataset - primary dataset used to train in part 1
+gauss-newton - shows gauss-newton without clutter
+test IRIS model - useful to see how well I did on parts 1 and 2
+direct comparison of weights - useful to see how well I did on part 2
+optimized wire meg array - not optimized but makes nice pictures
+parallel num solver with few sens - the way I trained the new model in part 2
+iris.pickle - the iris classifier trained in part 1
+4IRISrecon.pickle - the iris classifier trained to recreate iris.pickle in part 2
