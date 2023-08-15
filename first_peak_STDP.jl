@@ -25,11 +25,11 @@ end
 num_neurons = 20
 num_out = 3
 num_samps = 25
-num_gens = 500
+num_gens = 100
 sim_length = 300
 look_around = 20
 decision_time = look_around*2
-max_volt = 20
+max_volt = 30
 
 function dif_v(v, u, I)
 
@@ -231,8 +231,9 @@ function genSimOut(IrisIdx, NeurArray, SynArray, gen)
 	#fpga paper kinda confirmed this as an idea to try at least, called a training signal
 	#fpga paper is in computational intelligence and bioinspired systems
 	genadj = (num_gens-gen)/num_gens
+	#genadj = 1/(0.1*gen)
 
-	bleh = -1*ones(3)
+	bleh = -1.5*ones(3)
 	bleh[df[IrisIdx, 5]] *= -1
 	NeurArray[num_neurons-2].I = bleh[1]*curr_mult*genadj
 	NeurArray[num_neurons-1].I = bleh[2]*curr_mult*genadj
@@ -309,12 +310,16 @@ function STDP()
 	end
 
 	println(ArrayOfEXIN)
-	save("C:/Users/Dominic/Documents/julia projects/STDPexinFirst.jld", "exin", ArrayOfEXIN)
+	save("C:/Users/Dominic/Documents/julia projects/STDPexinFirstDense.jld", "exin", ArrayOfEXIN)
 
 	l = length(allowedSpaces)/2
 	learning_rate = 1/150
 
-	for gen in 1:num_gens
+	gen = 1
+	stuckCount = 0
+	bufferBrain = zeros(num_neurons, num_neurons)
+	while gen < num_gens
+		
 		delta = zeros(num_neurons, num_neurons)
 		num_right = 0
 		for pick in 1:150
@@ -328,14 +333,12 @@ function STDP()
 			counts[2] = sum(allSpikes[num_neurons-1, :])
 			counts[3] = sum(allSpikes[num_neurons-0, :])
 
-
-			if mod(gen, 25) == 0
-				#println(Brain)
-				if maximum(counts) != 0
-					counts/=maximum(counts)
-				end
-				num_right += rightGuess(counts, ans)
+			if maximum(counts) != 0
+				counts/=maximum(counts)
 			end
+			num_right += rightGuess(counts, ans)
+
+			
 
 			for idx in 1:l
 				idx = trunc(Int64, idx)
@@ -354,9 +357,22 @@ function STDP()
 			end
 			ArrayOfNeurs = resetNet(ArrayOfNeurs)
 		end
-
-		#delta -= sum(delta)/(num_neurons*num_neurons) #this will prevent weight explosion for sure, lol no it wont
+		if num_right < 135 #only moves on when accuracy still greater than 90%
+			gen -= 1
+			stuckCount += 1
+		else
+			stuckCount = 0
+			bufferBrain = Brain
+		end
 		Brain += delta
+		Brain += (rand(num_neurons, num_neurons) - 0.5*ones(num_neurons, num_neurons))*0.5.*SpArray
+		#add random noise term to avoid being stuck in ruts like it is now
+
+		#before the stuck counter and bufferBrain stuff this made it to gen 47 before effectively getting stuck in a loop
+		if stuckCount > 15
+			Brain = bufferBrain
+			stuckCount = 0
+		end
 		
 		for i in 1:num_neurons
 			for j in 1:num_neurons
@@ -368,10 +384,12 @@ function STDP()
 			end
 		end
 		Brain *= OGSum/sum(Brain) #makes sure it doesn't blow up to all maxes and 0s
-		println(gen, " ", num_right)
+		println(gen, " ", stuckCount, " ", num_right)
+		gen += 1
+		
 	end
 	println(Brain)
-	save("C:/Users/Dominic/Documents/julia projects/STDPbrainFirst.jld", "winner", Brain)
+	save("C:/Users/Dominic/Documents/julia projects/STDPbrainFirstDense.jld", "winner", Brain)
 end
 
 STDP()
