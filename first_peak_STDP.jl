@@ -25,11 +25,13 @@ end
 num_neurons = 20
 num_out = 3
 num_samps = 25
-num_gens = 100
+num_gens = 100 #maybe increae these so smaller change from gen to gen
 sim_length = 300
 look_around = 20
 decision_time = look_around*2
 max_volt = 30
+des_num_right_start = 149
+des_num_right_end = 134
 
 function dif_v(v, u, I)
 
@@ -130,7 +132,7 @@ function genSparseArray(dim)
 			end
 		end
 	end
-	#println(SparseArray)
+	println(SparseArray)
 	return SparseArray
 end
 
@@ -238,8 +240,11 @@ function genSimOut(IrisIdx, NeurArray, SynArray, gen)
 	NeurArray[num_neurons-2].I = bleh[1]*curr_mult*genadj
 	NeurArray[num_neurons-1].I = bleh[2]*curr_mult*genadj
 	NeurArray[num_neurons-0].I = bleh[3]*curr_mult*genadj
-		
-	
+
+	for i in 5:num_neurons-3
+		NeurArray[i].I += rand(-curr_mult:curr_mult)*rand([0,0,0,0,0,0,1])/4 #applies a random noise term to aid learning?
+	end
+			
 	while t < sim_length
 		sig = -1+(2/(1+exp(-0.05*(t-1*sim_length/3))))
 		NeurArray[num_neurons-2].I = bleh[1]*curr_mult*genadj*sig
@@ -317,11 +322,14 @@ function STDP()
 
 	gen = 1
 	stuckCount = 0
+	doubleStuck = 0
 	bufferBrain = zeros(num_neurons, num_neurons)
+	bufferBrain = zeros(num_gens, num_neurons, num_neurons)
 	while gen < num_gens
-		
+		thresh = des_num_right_start - (des_num_right_start - des_num_right_end)*gen/num_gens		
 		delta = zeros(num_neurons, num_neurons)
 		num_right = 0
+
 		for pick in 1:150
 			allSpikes = genSimOut(pick, ArrayOfNeurs, Brain, gen)
 			#refSpikes = genRefOut(pick)
@@ -338,8 +346,6 @@ function STDP()
 			end
 			num_right += rightGuess(counts, ans)
 
-			
-
 			for idx in 1:l
 				idx = trunc(Int64, idx)
 				i, j = allowedSpaces[idx, :]
@@ -353,27 +359,43 @@ function STDP()
 				elseif t > 0
 					delta[i, j] += learning_rate*exp(-t/look_around)*ArrayOfNeurs[i].exin
 				end
-
 			end
+			
 			ArrayOfNeurs = resetNet(ArrayOfNeurs)
 		end
-		if num_right < 135 #only moves on when accuracy still greater than 90%
+
+		if num_right < thresh #only moves on when accuracy still greater than threshold
 			gen -= 1
 			stuckCount += 1
 		else
+			doubleStuck = 0
 			stuckCount = 0
-			bufferBrain = Brain
+			bufferBrain[gen, :, :] = Brain[:, :]
 		end
-		Brain += delta
-		Brain += (rand(num_neurons, num_neurons) - 0.5*ones(num_neurons, num_neurons))*0.5.*SpArray
-		#add random noise term to avoid being stuck in ruts like it is now
 
 		#before the stuck counter and bufferBrain stuff this made it to gen 47 before effectively getting stuck in a loop
 		if stuckCount > 15
-			Brain = bufferBrain
+			Brain[:, :] = bufferBrain[gen, :, :]
 			stuckCount = 0
+			doubleStuck += 1
+		end 
+
+		if doubleStuck > 3
+			gen -= 1
+			Brain[:, :] = bufferBrain[gen, :, :]
+			stuckCount = 0
+			doubleStuck = 0
 		end
-		
+
+		Brain += delta
+		noise = rand(num_neurons, num_neurons)
+		noise *= sum(delta)/sum(noise)
+		noise .*= SpArray
+		noise -= SpArray*sum(noise)/sum(SpArray)
+		#Brain += noise*0.1 #goof with this coefficient 
+		#add random noise term to avoid being stuck in ruts like it is now
+		Brain += (rand(num_neurons, num_neurons) - 0.5*ones(num_neurons, num_neurons))*0.5.*SpArray
+
 		for i in 1:num_neurons
 			for j in 1:num_neurons
 				if Brain[i, j] > max_volt
@@ -384,7 +406,7 @@ function STDP()
 			end
 		end
 		Brain *= OGSum/sum(Brain) #makes sure it doesn't blow up to all maxes and 0s
-		println(gen, " ", stuckCount, " ", num_right)
+		println(gen, " ", stuckCount, " ", num_right, " ", thresh)
 		gen += 1
 		
 	end
