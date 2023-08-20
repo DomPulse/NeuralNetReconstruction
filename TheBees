@@ -1,0 +1,390 @@
+using CSV
+using DataFrames
+using JLD
+using PyPlot
+
+df = CSV.read("D:\\Neuro Sci\\juliaIZH\\NormalIRIS.csv", DataFrame)
+curr_mult = 30
+
+mutable struct Neur
+	V
+	u
+	a
+	b
+	c
+	d
+	I
+	jF #just fired
+	exin #exitatory or inhibitory
+end
+
+num_neurons = 20
+num_out = 3
+num_gens = 80
+sim_length = 200
+max_volt = 50
+num_samps = 21
+
+glob_n = 500
+num_select = 15
+num_best = 5
+nep = 40
+nsp = 25
+num_other = glob_n - (num_best*nep + (num_select - num_best)*nsp)
+ngh0 = max_volt
+
+silly_thing = zeros(num_samps)
+for i in 1:num_samps
+	silly_thing[i] = mod(i, 3)*50
+end
+
+function dif_v(v, u, I)
+
+	return (0.04*v^2)+(5*v)+140-u+I
+end
+
+function dif_u(v, u, a, b)
+
+	return a*(b*v-u)
+end
+
+function step_v(NeurArray)
+	for NeurIdx in 1:length(NeurArray)
+		NeurObj = NeurArray[NeurIdx]
+		NeurObj.V += dif_v(NeurObj.V, NeurObj.u, NeurObj.I)
+		NeurObj.u += dif_u(NeurObj.V, NeurObj.u, NeurObj.a, NeurObj.b)
+		if NeurObj.jF == true
+			NeurObj.jF = false
+			NeurObj.V = NeurObj.c
+			NeurObj.u = NeurObj.u + NeurObj.d
+		end
+		if NeurObj.V >= -30
+			NeurObj.V = 30
+			NeurObj.jF = true
+		end
+
+		if NeurObj.V <= -70
+			NeurObj.V = -70
+		end
+
+		NeurArray[NeurIdx] = NeurObj
+	end
+	return NeurArray
+end
+
+function step_I(NeurArray, SynArray)
+	#this formerly acted on the current input I 
+	#has since been changed to act on voltage in line with the IZH paper
+	for PreNeurIdx in 1:length(NeurArray)
+		for PostNeurIdx in 1:length(NeurArray)
+			bleh = SynArray[PreNeurIdx, PostNeurIdx]*NeurArray[PreNeurIdx].jF*NeurArray[PreNeurIdx].exin
+			NeurArray[PostNeurIdx].V += bleh
+		end
+	end
+
+	return NeurArray
+end
+
+function zero_I(NeurArray)
+	for NeurIdx in 1:length(NeurArray)
+		NeurArray[NeurIdx].I = 0
+	end
+	return NeurArray
+end
+
+function resetNet(NeurArray)
+	resetSyns = zeros(num_neurons, num_neurons)
+	NeurArray = zero_I(NeurArray)
+	t = 0
+	while t < 150
+		NeurArray = step_v(NeurArray)
+		NeurArray = step_I(NeurArray, resetSyns)
+
+		t += 1
+	end
+	return NeurArray
+end
+
+function randomSynArray(num_neurons)
+	#maybe initialize as all zeros rather than random values
+	#maybe make these all integers?
+	S = zeros(num_neurons, num_neurons)
+	S = (rand(num_neurons, num_neurons))*max_volt
+	return S
+end
+
+function genSparseArray(dim)
+	SparseArray = ones(dim, dim)
+	Sparse1 = rand(0:1, dim, dim)
+	SparseArray .*= Sparse1#.*Sparse1
+	#horrible way of tuning, should be able to pick % of desired 1's and just have it
+	for j in 1:num_neurons
+		SparseArray[j, j] = 0 #ensures no self stimulation
+		for i in 1:4
+			SparseArray[j, i] = 0 #ensures nothing stimulates raw input, would be weird if i could think and increase volume or the like
+		end
+	end
+	#println(SparseArray)
+	return SparseArray
+end
+
+function genAllowedSpace(ar1, dim)
+	c = sum(ar1)
+	c = trunc(Int, c)
+	allowed = zeros(c, 2)
+	idx = 0
+	for i in 1:dim
+		for j in 1:dim
+			if ar1[i, j] > 0
+				idx+=1
+				allowed[idx, :] = [i, j]
+			end
+		end
+	end
+	return(allowed)
+end
+
+function genSimOut(IrisIdx, NeurArray, SynArray)
+	Vs = zeros(num_neurons, sim_length)
+	jFs = zeros(num_neurons, sim_length)
+
+	t = 0
+	NeurArray[1].I = df[IrisIdx, 1]*curr_mult
+	NeurArray[2].I = df[IrisIdx, 2]*curr_mult
+	NeurArray[3].I = df[IrisIdx, 3]*curr_mult
+	NeurArray[4].I = df[IrisIdx, 4]*curr_mult
+	
+	while t < sim_length
+		NeurArray = step_I(NeurArray, SynArray)
+		NeurArray = step_v(NeurArray)		
+		t += 1
+
+		for i in 1:num_neurons
+			Vs[i, t] = NeurArray[i].V
+			jFs[i, t] = NeurArray[i].jF
+		end
+	end
+
+	#=
+	fig, axs = PyPlot.subplots(7)
+	axs[1].plot(1:sim_length, Vs[1, :])
+	axs[2].plot(1:sim_length, Vs[2, :])
+	axs[3].plot(1:sim_length, Vs[3, :])
+	axs[4].plot(1:sim_length, Vs[4, :])
+	axs[5].plot(1:sim_length, Vs[num_neurons-2, :])
+	axs[6].plot(1:sim_length, Vs[num_neurons-1, :])
+	axs[7].plot(1:sim_length, Vs[num_neurons-0, :])
+	PyPlot.show()
+	=#
+
+	return jFs
+end
+
+function rightGuess(ar1, ar2)
+	idxAns = 4
+	idxGuess = 0
+	num_ones = 0
+	for idx in 1:3
+		if ar2[idx] == 1
+			idxAns = idx
+		end
+		if ar1[idx] == 1
+			idxGuess = idx
+			num_ones += 1
+		end
+	end
+	if idxGuess == idxAns && num_ones == 1
+		return 1
+	end
+	return 0
+end
+
+function mutateSynArray(SynArray, allowed)
+	l = length(allowed)/2
+	idx = rand(1:l)
+	idx = trunc(Int64, idx)
+	i, j = allowed[idx, :]
+	i = trunc(Int64, i)
+	j = trunc(Int64, j)
+
+	if i == j
+		SynArray = mutateSynArray(SynArray, allowed)
+	else
+		SynArray[i, j] = (rand(Float64))*max_volt
+	end
+
+	return SynArray
+end
+
+function findCandSpots(scores)
+	sorted_scores = sort(scores, rev=true)
+	println(sorted_scores[1])
+	idxBest = []
+	idxSel = []
+	for i in 1:length(scores)
+		if scores[i] >= sorted_scores[num_best] && length(idxBest) < num_best
+			append!(idxBest, i)
+		elseif scores[i] >= sorted_scores[num_select] && length(idxSel) < num_select
+			append!(idxSel, i)
+		end
+	end
+	return idxBest, idxSel
+end
+
+function allocateScouts(idxBest, idxSel, AllBrains, allowed, SpArray, NeurArray)
+	
+	best_patches = zeros(num_best, nep, num_neurons, num_neurons)
+	best_patches_scores = zeros(num_best, nep)
+	good_patches = zeros(num_select - num_best, nsp, num_neurons, num_neurons)
+	good_patches_scores = zeros(num_select - num_best, nsp)
+	other_scouts = zeros(glob_n - num_select, num_neurons, num_neurons)
+	other_scouts_scores = zeros(num_other)
+
+	train_list = rand(1:50, num_samps).+silly_thing
+
+	for b in 1:num_best
+		for p in 1:nep
+			best_patches[b, p, :, :] = mutateSynArray(AllBrains[idxBest[b], :, :], allowed)
+		end
+		best_patches_scores[b, :] = evalFit(best_patches[b, :, :, :], NeurArray, train_list, nep)
+	end
+	for s in 1:(num_select - num_best)
+		for p in 1:nsp
+			good_patches[s, p, :, :] = mutateSynArray(AllBrains[idxSel[s], :, :], allowed)
+		end
+		good_patches_scores[s, :] = evalFit(good_patches[s, :, :, :], NeurArray, train_list, nsp)
+	end
+
+	newBrains = zeros(glob_n, num_neurons, num_neurons)
+
+	temp_count = 1
+	for b in 1:num_best
+		for p in 1:nep
+			if best_patches_scores[b, p] == maximum(best_patches_scores[b, :])
+				newBrains[temp_count, :, :] = best_patches[b, p, :, :]
+				temp_count += 1
+				break
+			end
+		end
+	end
+	for s in 1:(num_select - num_best)
+		for p in 1:nsp
+			if good_patches_scores[s, p] == maximum(good_patches_scores[s, :])
+				newBrains[temp_count, :, :] = good_patches[s, p, :, :]
+				temp_count += 1
+				break
+			end
+		end
+	end 
+
+	for i in num_select+1:glob_n
+		newBrains[i, :, :] = randomSynArray(num_neurons).*SpArray
+	end
+
+	#=
+	for k in 1:(glob_n - num_select)
+		other_scouts[k, :, :] = randomSynArray(num_neurons).*SpArray
+	end
+	other_scouts_scores = evalFit(other_scouts, NeurArray, train_list, num_other)
+	=#
+
+	return newBrains
+end
+
+function evalFit(AllBrains, NeurArray, train_list, num_brains)
+	
+	scores = zeros(num_brains)
+
+	for b in 1:num_brains
+		for pick in train_list
+			pick = trunc(Int64, pick)
+			allSpikes = genSimOut(pick, NeurArray, AllBrains[b, :, :])
+			ans = zeros(3)
+			ans[df[pick, 5]] = 1
+			countsMutt = zeros(3)
+			countsMutt[1] = sum(allSpikes[num_neurons-2, :])
+			countsMutt[2] = sum(allSpikes[num_neurons-1, :])
+			countsMutt[3] = sum(allSpikes[num_neurons-0, :])
+
+			if maximum(countsMutt) != 0
+				countsMutt/=(maximum(countsMutt))
+			end
+
+			scores[b] += rightGuess(countsMutt, ans)
+		end
+	end
+
+	return scores
+end
+
+function findWinner(AllBrains, NeurArray)
+	train_list = rand(1:50, num_samps).+silly_thing
+	keep_idx = 1
+	max_score = 0
+	for b in 1:glob_n
+		score = 0
+		for pick in train_list
+			pick = trunc(Int64, pick)
+			allSpikes = genSimOut(pick, NeurArray, AllBrains[b, :, :])
+			ans = zeros(3)
+			ans[df[pick, 5]] = 1
+			countsMutt = zeros(3)
+			countsMutt[1] = sum(allSpikes[num_neurons-2, :])
+			countsMutt[2] = sum(allSpikes[num_neurons-1, :])
+			countsMutt[3] = sum(allSpikes[num_neurons-0, :])
+
+			if maximum(countsMutt) != 0
+				countsMutt/=(maximum(countsMutt))
+			end
+			score += rightGuess(countsMutt, ans)
+		end
+		if score > max_score
+			max_score = score
+			keep_idx = b
+		end
+	end
+	save("D:/Neuro Sci/juliaIZH/BeesAlgoBrain.jld", "winner", AllBrains[keep_idx, :, :])
+end
+
+function Jackets()
+	SpArray = genSparseArray(num_neurons)
+	allowedSpaces = genAllowedSpace(SpArray, num_neurons)
+	AllBrains = zeros(glob_n, num_neurons, num_neurons)
+	for b in 1:glob_n
+		AllBrains[b, :, :] = randomSynArray(num_neurons).*SpArray
+	end
+
+	ArrayOfNeurs = []
+	ArrayOfEXIN = []
+	for i in 1:num_neurons
+		exin = (rand() > 0.3)*2 - 1
+		if i <= 4
+			exin = 1
+		elseif i >= num_neurons - 3
+			exin = -1
+		end
+		append!(ArrayOfEXIN, exin)
+		append!(ArrayOfNeurs, [Neur(-65, -13, 0.02, 0.2, -65, 4, 0, false, exin)])
+	end
+
+	println(ArrayOfEXIN)
+	save("D:/Neuro Sci/juliaIZH/BeesAlgoExin.jld", "exin", ArrayOfEXIN)
+
+	l = length(allowedSpaces)/2
+
+	for gen in 1:num_gens
+
+		train_list = rand(1:50, num_samps).+silly_thing
+		scores = evalFit(AllBrains, ArrayOfNeurs, train_list, glob_n)
+
+		print(gen, " ")
+		idxBest, idxSel = findCandSpots(scores)
+		AllBrains = allocateScouts(idxBest, idxSel, AllBrains, allowedSpaces, SpArray, ArrayOfNeurs)
+
+	end
+	findWinner(AllBrains, ArrayOfNeurs)
+	println(AllBrains)
+	save("D:/Neuro Sci/juliaIZH/BeesAlgoAllBrainsForRetest.jld", "all", AllBrains)
+end
+
+Jackets()
