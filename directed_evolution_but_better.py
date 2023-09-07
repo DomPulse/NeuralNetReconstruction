@@ -164,17 +164,24 @@ def targetMutt(Brain, cand_neurons, max_mutts = 150):
 
 	return Brain
 
+def mse_recon(refBrain, testBrain):
+	mse = 0
+	for i in range(0, num_neurons):
+		for j in range(0, num_neurons):
+			mse += ((refBrain[i][j] - testBrain[i][j])**2)/(num_neurons*num_neurons)
+	return mse
 
 refFires = []
 for i in range(0, 150):
 	refFires.append(partialSim(sim_length, ModBrain, i))
 
 reconBrain = np.zeros((num_neurons, num_neurons))
-time_steps = 10
+time_steps = 5
 
 passed = False
 gen = 0
 max_max_t = 0
+max_num_perfect = 0
 while not passed:
 	gen += 1
 	partialTestFires = []
@@ -187,11 +194,15 @@ while not passed:
 		avg_max_t += t/150
 		if t == time_steps:
 			num_perfect += 1
+	if num_perfect > max_num_perfect:
+		max_num_perfect = num_perfect
+		print(reconBrain)
+
 	if avg_max_t > max_max_t:
 		max_max_t = avg_max_t
-		print(reconBrain)
+		
 	reconBrain = targetMutt(reconBrain, fire_right_and_wrong_at_each_iris)
 	passed = np.array_equal(fire_right_and_wrong_at_each_iris, np.zeros((150, 2, num_neurons)))
-	print(gen, avg_max_t, max_max_t, num_perfect)
+	print(gen, avg_max_t, max_max_t, num_perfect, max_num_perfect, mse_recon(ModBrain, reconBrain))
 
 
