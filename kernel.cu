@@ -34,7 +34,7 @@ __global__ void update_neuron(T* neuron, T* fit_params)
     neuron[neuron_idx] += 0.5 * (0.04 * neuron[neuron_idx] * neuron[neuron_idx] + 5 * neuron[neuron_idx] + 140 - neuron[neuron_idx + 1] + neuron[neuron_idx + 2]);
     neuron[neuron_idx] += 0.5 * (0.04 * neuron[neuron_idx] * neuron[neuron_idx] + 5 * neuron[neuron_idx] + 140 - neuron[neuron_idx + 1] + neuron[neuron_idx + 2]);
     neuron[neuron_idx + 1] += fit_params[neuron_idx] * (fit_params[neuron_idx + 1] * neuron[neuron_idx] - neuron[neuron_idx + 1]);
-    neuron[neuron_idx + 2] = 5;
+    neuron[neuron_idx + 2] = 0;
     if (neuron[neuron_idx] >= 30)
     {
         neuron[neuron_idx] = fit_params[neuron_idx + 2];
@@ -157,28 +157,29 @@ int main() {
     cudaMalloc((void**)&d_exin_array, num_neurons * sizeof(int));
     
     //transfering initializaed data to gpu
-    cudaMemcpy(d_neurons, &h_neurons[0], 4 * num_neurons * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_alphabet, &h_alphabet[0], 4 * num_neurons * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_synapses, &h_synapses[0], num_neurons * num_neurons * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_exin_array, &h_exin_array[0], num_neurons * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_neurons, h_neurons.data(), 4 * num_neurons * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_alphabet, h_alphabet.data(), 4 * num_neurons * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_synapses, h_synapses.data(), num_neurons * num_neurons * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_exin_array, h_exin_array.data(), num_neurons * sizeof(int), cudaMemcpyHostToDevice);
     
     // Launch kernel to generate random numbers on the GPU
-    int threadsPerBlock = 1024; //was formerly 256
-    int blocksPerGrid = (num_neurons*num_neurons + threadsPerBlock - 1) / threadsPerBlock;
+    int threadsPerBlock = 256; //was formerly 256
+    int blocksPerGrid = (num_neurons + threadsPerBlock - 1) / threadsPerBlock;
 
     //update the neurons with 1ms time step
     for (int t = 0; t < sim_time; t++)
     {
         //take action brother!
-        update_neuron << <blocksPerGrid, threadsPerBlock >> > (d_neurons, d_alphabet);
+        update_neuron<<<blocksPerGrid, threadsPerBlock >>>(d_neurons, d_alphabet);
         //yeah so now i just need the currents implimented so thats cool
+        
     }
-
     // Copy the result back to the host
-    cudaMemcpy(&h_neurons[0], d_neurons, num_neurons * 4 * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&h_alphabet[0], d_alphabet, num_neurons * 4 * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&h_synapses[0], d_synapses, num_neurons * num_neurons * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&h_exin_array[0], d_exin_array, num_neurons * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_neurons.data(), d_neurons, num_neurons * 4 * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_alphabet.data(), d_alphabet, num_neurons * 4 * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_synapses.data(), d_synapses, num_neurons * num_neurons * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_exin_array.data(), d_exin_array, num_neurons * sizeof(int), cudaMemcpyDeviceToHost);
+    cout << h_neurons[4] << endl;
 
     // Cleanup
     cudaFree(d_neurons);
