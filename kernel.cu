@@ -9,16 +9,25 @@
 using namespace std;
 
 template <typename T>
-__global__ void generateRandomNumbers(T* data, int size, unsigned long long seed, unsigned long long offset) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    curandState state;
-    curand_init(seed, tid, offset, &state);
-
-    // Generate random number and store in the corresponding position
-    if (tid < size) {
-        data[tid] = curand_normal(&state);
+__global__ void synapse_current(T* neuron, T* synapses, int num_neurons) {//yeah we be working on its
+    //should probably interchange the order of pre and post syn idx so i can just check if it fired once and avoid the loop if it didn't
+    int post_syn_idx = (blockIdx.x * blockDim.x + threadIdx.x) * 4;
+    for (int pre_syn_idx = 0; pre_syn_idx < num_neurons; pre_syn_idx++)
+    {
+        int tot_idx = post_syn_idx * num_neurons / 4 + pre_syn_idx; 
+        neuron[post_syn_idx + 2] += synapses[tot_idx]*neuron[pre_syn_idx * 4 + 3];
     }
 }
+
+template <typename T>
+__global__ void noisy_current(T* neuron, int* exin, unsigned long long seed, unsigned long long offset) {//yeah idk how the whoel T* thing works, it had a breakdown when i tried to pass a float and an int, crazy stuff
+    int neuron_idx = (blockIdx.x * blockDim.x + threadIdx.x) * 4;
+    curandState state;
+    curand_init(seed, neuron_idx, offset, &state);
+
+    neuron[neuron_idx + 2] = (2 + 3 * (exin[neuron_idx / 4] == 1)) * curand_normal(&state); //this is probably the slow down, should probably have 4 vector instead of 1 vector with 4x the length  
+}
+
 template <typename T>
 __global__ void update_neuron(T* neuron, T* fit_params)
 {
@@ -131,7 +140,7 @@ int main() {
     unsigned long long seed = 1234;  // Random seed
 
     int num_neurons = 1024;  
-    int sim_time{ 10000 };
+    int sim_time{ 1000 };
     float frac_inhib{ 0.2 };
 
     // Host vector to store the result
@@ -163,14 +172,16 @@ int main() {
     cudaMemcpy(d_exin_array, h_exin_array.data(), num_neurons * sizeof(int), cudaMemcpyHostToDevice);
     
     // Launch kernel to generate random numbers on the GPU
-    int threadsPerBlock = 256; //was formerly 256
+    int threadsPerBlock = 32; //was formerly 256
     int blocksPerGrid = (num_neurons + threadsPerBlock - 1) / threadsPerBlock;
 
     //update the neurons with 1ms time step
     for (int t = 0; t < sim_time; t++)
     {
         //take action brother!
-        update_neuron<<<blocksPerGrid, threadsPerBlock >>>(d_neurons, d_alphabet);
+        update_neuron << <blocksPerGrid, threadsPerBlock >> >(d_neurons, d_alphabet);
+        noisy_current << <blocksPerGrid, threadsPerBlock >> > (d_neurons, d_exin_array, seed, 0.0);
+        synapse_current << <blocksPerGrid, threadsPerBlock >> > (d_neurons, d_synapses, num_neurons);
         //yeah so now i just need the currents implimented so thats cool
         
     }
