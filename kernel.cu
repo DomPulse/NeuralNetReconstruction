@@ -5,6 +5,7 @@
 #include <chrono>
 using namespace std;
 
+
 template <typename T>
 __global__ void synapse_current(T* curr, bool* fire, T* synapses, int num_neurons, int num_syns) 
 {
@@ -28,7 +29,21 @@ __global__ void noisy_current(T* curr, bool* exin, unsigned long long seed, unsi
     curandState state;
     curand_init(seed, neuron_idx, offset, &state);
 
-    curr[neuron_idx] = (2 + 3 * (exin[neuron_idx] == 1)) * curand_normal(&state); //this is probably the slow down, should probably have 4 vector instead of 1 vector with 4x the length  
+    if (exin[neuron_idx] == 1) 
+    {
+        curr[neuron_idx] = 5 * curand_normal(&state);
+    }
+    else
+    {
+        curr[neuron_idx] = 2 * curand_normal(&state);
+    }
+}
+
+template <typename T>
+__global__ void psuedo_noisy_current(T* curr, bool* exin, T* start_current, int offset) 
+{
+    int neuron_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    curr[neuron_idx] = (2 + (exin[neuron_idx] == 1)*3) * start_current[neuron_idx];
 }
 
 template <typename T>
@@ -89,6 +104,15 @@ __global__ void define_exin_array(T* temp_exin_array, unsigned long long seed, u
     {
         temp_exin_array[neuron_idx] = 1;
     }
+}
+
+template <typename T>
+__global__ void define_start_curr(T* start_current, unsigned long long seed, unsigned long long offset)
+{
+    int neuron_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    curandState state;
+    curand_init(seed, neuron_idx, offset, &state);
+    start_current[neuron_idx] = curand_normal(&state);
 }
 
 template <typename T>
@@ -157,7 +181,6 @@ int main() {
     unsigned long long seed = 1234;  // Random seed
 
     int num_neurons = 32768*32;
-    num_neurons = 2048*64*2;
     int syns_per_neur = 1023;
     int sim_time{ 1000 };
 
@@ -182,6 +205,7 @@ int main() {
     float* d_fit_param;
     float* d_synapses;
     bool* d_exin_array;
+    float* psuedo_rand_curr;
 
     cudaMalloc((void**)&d_volt, num_neurons * sizeof(float));
     cudaMalloc((void**)&d_rec, num_neurons * sizeof(float));
@@ -190,9 +214,11 @@ int main() {
     cudaMalloc((void**)&d_fit_param, num_neurons * sizeof(float));
     cudaMalloc((void**)&d_synapses, num_neurons * syns_per_neur * 2 * sizeof(float));
     cudaMalloc((void**)&d_exin_array, num_neurons * sizeof(bool));
+    cudaMalloc((void**)&psuedo_rand_curr, num_neurons * sizeof(float));
 
     //initializing data on gpu
     define_exin_array << <blocksPerGrid, threadsPerBlock >> > (d_exin_array, seed, 0.0);
+    define_start_curr << <blocksPerGrid, threadsPerBlock >> > (psuedo_rand_curr, seed, 0.0);
     define_fit_params << <blocksPerGrid, threadsPerBlock >> > (d_fit_param, seed, 0.0);
     initialize_neurons << <blocksPerGrid, threadsPerBlock >> > (d_volt, d_rec, d_curr, d_fire, d_exin_array, d_fit_param);
     define_synapses << <blocksPerGrid, threadsPerBlock >> > (d_synapses, d_exin_array, num_neurons, syns_per_neur, seed, 0.0);
@@ -204,9 +230,13 @@ int main() {
     {
         //take action brother!
         update_neuron << <blocksPerGrid, threadsPerBlock >> > (d_volt, d_rec, d_curr, d_fire, d_exin_array, d_fit_param);
-        noisy_current << <blocksPerGrid, threadsPerBlock >> > (d_curr, d_exin_array, seed, 0.0);
+        //noisy_current << <blocksPerGrid, threadsPerBlock >> > (d_curr, d_exin_array, seed, 0.0); //this is the slowest by a mile, no idea why
+
+        //these two functions contribute approximately equally to the run time from what it seems
+        // if i can optimize both some more i might be able to get it to true real time with a million neurons
+        psuedo_noisy_current << <blocksPerGrid, threadsPerBlock >> > (d_curr, d_exin_array, psuedo_rand_curr, t); 
         synapse_current << <blocksPerGrid, threadsPerBlock >> > (d_curr, d_fire, d_synapses, num_neurons, syns_per_neur);
-        //yeah so now i just need the currents implimented so thats cool
+
 
     }
     
