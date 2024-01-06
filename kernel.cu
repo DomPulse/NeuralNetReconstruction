@@ -5,19 +5,31 @@
 #include <chrono>
 using namespace std;
 
+template <typename T>
+__global__ void matrix_mul_syn_curr(T* curr, bool* fire, T* syn_weights, int* post_syn_idx, int num_neurons, int num_syns)
+{
+    // Compute each thread's global row and column index
+    int syn_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    int neuron_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (fire[neuron_idx] == 1)
+    {
+        int tot_idx = neuron_idx * num_syns + syn_idx; //remember this so i can actuall reference shit later
+        curr[post_syn_idx[tot_idx]] += syn_weights[tot_idx];
+    }
+
+}
 
 template <typename T>
-__global__ void synapse_current(T* curr, bool* fire, T* synapses, int num_neurons, int num_syns) 
+__global__ void synapse_current(T* curr, bool* fire, T* syn_weights, int* post_syn_idx, int num_neurons, int num_syns)
 {
-    //should probably interchange the order of pre and post syn idx so i can just check if it fired once and avoid the loop if it didn't
+    //this is now vestigial code :)
     int neuron_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (fire[neuron_idx] == 1) 
     {
         for (int syn_idx = 0; syn_idx < num_syns; syn_idx++)
         {
-            int tot_idx = (neuron_idx * num_syns + syn_idx) * 2; //remember this so i can actuall reference shit later
-            int post_syn_idx = (int)synapses[tot_idx];
-            curr[post_syn_idx] += synapses[tot_idx+1];
+            int tot_idx = neuron_idx * num_syns + syn_idx; //remember this so i can actuall reference shit later
+            curr[post_syn_idx[tot_idx]] += syn_weights[tot_idx];
         }
     }
     
@@ -40,10 +52,10 @@ __global__ void noisy_current(T* curr, bool* exin, unsigned long long seed, unsi
 }
 
 template <typename T>
-__global__ void psuedo_noisy_current(T* curr, bool* exin, T* start_current, int offset) 
+__global__ void psuedo_noisy_current(T* curr, bool* exin, T* start_current, int offset, int num_neurons) 
 {
     int neuron_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    curr[neuron_idx] = (2 + (exin[neuron_idx] == 1)*3) * start_current[neuron_idx];
+    curr[neuron_idx] = (2 + (exin[neuron_idx] == 1)*3) * start_current[(neuron_idx + offset)%num_neurons];
 }
 
 template <typename T>
@@ -161,7 +173,7 @@ __global__ void initialize_neurons(T* volt, T* rec, T* curr, bool* fire, bool* e
 }
 
 template <typename T>
-__global__ void define_synapses(T* rand_synapses, bool* exin, int num_neurons, int num_syns, unsigned long long seed, unsigned long long offset)
+__global__ void define_synapses(T* rand_syn_weights, int* post_syn_idx, bool* exin, int num_neurons, int num_syns, unsigned long long seed, unsigned long long offset)
 {
     //neurons are all given as pre_synaptic
     int neuron_idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -170,9 +182,9 @@ __global__ void define_synapses(T* rand_synapses, bool* exin, int num_neurons, i
 
     for (int syn_idx = 0; syn_idx < num_syns; syn_idx++)
     {
-        int tot_idx = (neuron_idx * num_syns + syn_idx) * 2; //remember this so i can actuall reference shit later
-        rand_synapses[tot_idx] = (curand_uniform(&state) * num_neurons); //assigns the post synaptic index, far too lazy to make sure there are no repeats (really need to work on that)
-        rand_synapses[tot_idx + 1] = (curand_uniform(&state)) * (exin[neuron_idx] * 2 - 1) * (1 - 0.5 * (exin[neuron_idx] == 1)); //assigns the actual synaptic weight
+        int tot_idx = neuron_idx * num_syns + syn_idx; //remember this so i can actuall reference shit later
+        post_syn_idx[tot_idx] = (int)(curand_uniform(&state) * num_neurons); //assigns the post synaptic index, far too lazy to make sure there are no repeats (really need to work on that)
+        rand_syn_weights[tot_idx] = (curand_uniform(&state)) * (exin[neuron_idx] * 2 - 1) * (1 - 0.5 * (exin[neuron_idx] == 1)); //assigns the actual synaptic weight
 
     }
 }
@@ -180,9 +192,9 @@ __global__ void define_synapses(T* rand_synapses, bool* exin, int num_neurons, i
 int main() {
     unsigned long long seed = 1234;  // Random seed
 
-    int num_neurons = 32768*32;
+    int num_neurons = 1048576;
     int syns_per_neur = 1023;
-    int sim_time{ 1000 };
+    int sim_time{ 15000 };
 
     // Host vector to store the result
     vector<float> h_volt(num_neurons);
@@ -194,8 +206,11 @@ int main() {
     vector<bool> h_exin_array(num_neurons);
 
     // Launch kernel to generate random numbers on the GPU
-    int threadsPerBlock = 32; //was formerly 256
+    int threadsPerBlock = 128; //was formerly 256
     int blocksPerGrid = (num_neurons + threadsPerBlock - 1) / threadsPerBlock;
+
+    dim3 threads(threadsPerBlock, threadsPerBlock);
+    dim3 blocks(blocksPerGrid, blocksPerGrid);
 
     // Device vector
     float* d_volt;
@@ -203,7 +218,8 @@ int main() {
     float* d_curr;
     bool* d_fire;
     float* d_fit_param;
-    float* d_synapses;
+    int* d_syn_idxs;
+    float* d_syn_weights;
     bool* d_exin_array;
     float* psuedo_rand_curr;
 
@@ -212,7 +228,8 @@ int main() {
     cudaMalloc((void**)&d_curr, num_neurons * sizeof(float));
     cudaMalloc((void**)&d_fire, num_neurons * sizeof(bool));
     cudaMalloc((void**)&d_fit_param, num_neurons * sizeof(float));
-    cudaMalloc((void**)&d_synapses, num_neurons * syns_per_neur * 2 * sizeof(float));
+    cudaMalloc((void**)&d_syn_idxs, num_neurons * syns_per_neur * sizeof(int));
+    cudaMalloc((void**)&d_syn_weights, num_neurons * syns_per_neur * sizeof(float));
     cudaMalloc((void**)&d_exin_array, num_neurons * sizeof(bool));
     cudaMalloc((void**)&psuedo_rand_curr, num_neurons * sizeof(float));
 
@@ -221,7 +238,7 @@ int main() {
     define_start_curr << <blocksPerGrid, threadsPerBlock >> > (psuedo_rand_curr, seed, 0.0);
     define_fit_params << <blocksPerGrid, threadsPerBlock >> > (d_fit_param, seed, 0.0);
     initialize_neurons << <blocksPerGrid, threadsPerBlock >> > (d_volt, d_rec, d_curr, d_fire, d_exin_array, d_fit_param);
-    define_synapses << <blocksPerGrid, threadsPerBlock >> > (d_synapses, d_exin_array, num_neurons, syns_per_neur, seed, 0.0);
+    define_synapses << <blocksPerGrid, threadsPerBlock >> > (d_syn_weights, d_syn_idxs, d_exin_array, num_neurons, syns_per_neur, seed, 0.0);
 
     //update the neurons with 1ms time step
     cout << "started" << endl;
@@ -234,10 +251,8 @@ int main() {
 
         //these two functions contribute approximately equally to the run time from what it seems
         // if i can optimize both some more i might be able to get it to true real time with a million neurons
-        psuedo_noisy_current << <blocksPerGrid, threadsPerBlock >> > (d_curr, d_exin_array, psuedo_rand_curr, t); 
-        synapse_current << <blocksPerGrid, threadsPerBlock >> > (d_curr, d_fire, d_synapses, num_neurons, syns_per_neur);
-
-
+        psuedo_noisy_current << <blocksPerGrid, threadsPerBlock >> > (d_curr, d_exin_array, psuedo_rand_curr, t, num_neurons);
+        matrix_mul_syn_curr << <blocksPerGrid, threadsPerBlock >> > (d_curr, d_fire, d_syn_weights, d_syn_idxs, num_neurons, syns_per_neur); 
     }
     
 
@@ -254,7 +269,8 @@ int main() {
     cudaFree(d_rec);
     cudaFree(d_curr);
     cudaFree(d_fire);
-    cudaFree(d_synapses);
+    cudaFree(d_syn_idxs);
+    cudaFree(d_syn_weights);
     cudaFree(d_exin_array);
 
     return 0;
