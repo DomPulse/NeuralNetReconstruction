@@ -3,6 +3,7 @@
 #include <curand_kernel.h>
 #include <random>
 #include <chrono>
+#include <fstream>
 using namespace std;
 
 template <typename T>
@@ -11,12 +12,11 @@ __global__ void matrix_mul_syn_curr(T* curr, bool* fire, T* syn_weights, int* po
     // Compute each thread's global row and column index
     int syn_idx = blockIdx.y * blockDim.y + threadIdx.y;
     int neuron_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (fire[neuron_idx] == 1)
+    if (neuron_idx < num_neurons && syn_idx < num_syns)
     {
         int tot_idx = neuron_idx * num_syns + syn_idx; //remember this so i can actuall reference shit later
-        curr[post_syn_idx[tot_idx]] += syn_weights[tot_idx];
+        curr[post_syn_idx[tot_idx]] += syn_weights[tot_idx] * fire[neuron_idx];
     }
-
 }
 
 template <typename T>
@@ -24,15 +24,18 @@ __global__ void synapse_current(T* curr, bool* fire, T* syn_weights, int* post_s
 {
     //this is now vestigial code :)
     int neuron_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (fire[neuron_idx] == 1) 
+    if (neuron_idx < num_neurons)
     {
-        for (int syn_idx = 0; syn_idx < num_syns; syn_idx++)
+        if (fire[neuron_idx] == 1)
         {
-            int tot_idx = neuron_idx * num_syns + syn_idx; //remember this so i can actuall reference shit later
-            curr[post_syn_idx[tot_idx]] += syn_weights[tot_idx];
+            for (int syn_idx = 0; syn_idx < num_syns; syn_idx++)
+            {
+                int tot_idx = neuron_idx * num_syns + syn_idx; //remember this so i can actuall reference shit later
+                curr[post_syn_idx[tot_idx]] += syn_weights[tot_idx];
+            }
         }
     }
-    
+
 }
 
 template <typename T>
@@ -41,7 +44,7 @@ __global__ void noisy_current(T* curr, bool* exin, unsigned long long seed, unsi
     curandState state;
     curand_init(seed, neuron_idx, offset, &state);
 
-    if (exin[neuron_idx] == 1) 
+    if (exin[neuron_idx] == 1)
     {
         curr[neuron_idx] = 5 * curand_normal(&state);
     }
@@ -52,14 +55,18 @@ __global__ void noisy_current(T* curr, bool* exin, unsigned long long seed, unsi
 }
 
 template <typename T>
-__global__ void psuedo_noisy_current(T* curr, bool* exin, T* start_current, int offset, int num_neurons) 
+__global__ void psuedo_noisy_current(T* curr, bool* exin, T* start_current, int offset, int num_neurons)
 {
+
     int neuron_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    curr[neuron_idx] = (2 + (exin[neuron_idx] == 1)*3) * start_current[(neuron_idx + offset)%num_neurons];
+    if (neuron_idx < num_neurons)
+    {
+        curr[neuron_idx] = (2 + (exin[neuron_idx] == 1) * 3) * start_current[(neuron_idx + offset) % num_neurons];
+    }
 }
 
 template <typename T>
-__global__ void update_neuron(T* volt, T* rec, T* curr, bool* fire, bool* exin, T* fit_param)
+__global__ void update_neuron(T* volt, T* rec, T* curr, bool* fire, bool* exin, T* fit_param, int num_neurons)
 {
     //indexed by taking the neuron_idx + some offset
     //neuron_idx+0 -> V
@@ -69,107 +76,123 @@ __global__ void update_neuron(T* volt, T* rec, T* curr, bool* fire, bool* exin, 
     //bc of this, neuron_idx counts by 4
     //same scheme for fit parameters
     int neuron_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    float a = 0;
-    float b = 0;
-    float c = 0;
-    float d = 0;
-    if (exin[neuron_idx] == 0)
+    if (neuron_idx < num_neurons)
     {
-        a = 0.02 + 0.08 * fit_param[neuron_idx];
-        b = 0.25 - 0.05 * fit_param[neuron_idx];
-        c = -65.0;
-        d = 2;
-        
-    }
-    else
-    {
-        a = 0.02;
-        b = 0.2;
-        c = -65.0 + 15 * fit_param[neuron_idx] * fit_param[neuron_idx];
-        d = 8 - 6 * fit_param[neuron_idx] * fit_param[neuron_idx];
-    }
+        float a = 0;
+        float b = 0;
+        float c = 0;
+        float d = 0;
+        if (exin[neuron_idx] == 0)
+        {
+            a = 0.02 + 0.08 * fit_param[neuron_idx];
+            b = 0.25 - 0.05 * fit_param[neuron_idx];
+            c = -65.0;
+            d = 2;
 
-    fire[neuron_idx] = 0;
-    volt[neuron_idx] += 0.5 * (0.04 * volt[neuron_idx] * volt[neuron_idx] + 5 * volt[neuron_idx] + 140 - rec[neuron_idx] + curr[neuron_idx]);
-    volt[neuron_idx] += 0.5 * (0.04 * volt[neuron_idx] * volt[neuron_idx] + 5 * volt[neuron_idx] + 140 - rec[neuron_idx] + curr[neuron_idx]);
-    rec[neuron_idx] += a * (b * volt[neuron_idx] - rec[neuron_idx]);
-    curr[neuron_idx] = 0;
-    if (volt[neuron_idx] >= 30)
+        }
+        else
+        {
+            a = 0.02;
+            b = 0.2;
+            c = -65.0 + 15 * fit_param[neuron_idx] * fit_param[neuron_idx];
+            d = 8 - 6 * fit_param[neuron_idx] * fit_param[neuron_idx];
+        }
+
+        fire[neuron_idx] = 0;
+        volt[neuron_idx] += 0.5 * (0.04 * volt[neuron_idx] * volt[neuron_idx] + 5 * volt[neuron_idx] + 140 - rec[neuron_idx] + curr[neuron_idx]);
+        volt[neuron_idx] += 0.5 * (0.04 * volt[neuron_idx] * volt[neuron_idx] + 5 * volt[neuron_idx] + 140 - rec[neuron_idx] + curr[neuron_idx]);
+        rec[neuron_idx] += a * (b * volt[neuron_idx] - rec[neuron_idx]);
+        curr[neuron_idx] = 5;
+        if (volt[neuron_idx] >= 30)
+        {
+            volt[neuron_idx] = c;
+            rec[neuron_idx] += d;
+            fire[neuron_idx] = 1;
+        }
+    }
+    
+}
+
+template <typename T>
+__global__ void define_exin_array(T* temp_exin_array, unsigned long long seed, unsigned long long offset, int num_neurons)
+{
+    int neuron_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (neuron_idx < num_neurons)
     {
-        volt[neuron_idx] = c;
-        rec[neuron_idx] += d;
-        fire[neuron_idx] = 1;
+        curandState state;
+        curand_init(seed, neuron_idx, offset, &state);
+        if (curand_uniform(&state) < 0.2) //this 0.2 is frac inhibit, i'm hardcoding it like a dumb dumb
+        {
+            temp_exin_array[neuron_idx] = 0;
+        }
+        else
+        {
+            temp_exin_array[neuron_idx] = 1;
+        }
     }
 }
 
 template <typename T>
-__global__ void define_exin_array(T* temp_exin_array, unsigned long long seed, unsigned long long offset)
+__global__ void define_start_curr(T* start_current, unsigned long long seed, unsigned long long offset, int num_neurons)
 {
     int neuron_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    curandState state;
-    curand_init(seed, neuron_idx, offset, &state);
-    if (curand_uniform(&state) < 0.2) //this 0.2 is frac inhibit, i'm hardcoding it like a dumb dumb
+    if (neuron_idx < num_neurons)
     {
-        temp_exin_array[neuron_idx] = 0;
-    }
-    else
-    {
-        temp_exin_array[neuron_idx] = 1;
+        curandState state;
+        curand_init(seed, neuron_idx, offset, &state);
+        start_current[neuron_idx] = curand_normal(&state);
     }
 }
 
 template <typename T>
-__global__ void define_start_curr(T* start_current, unsigned long long seed, unsigned long long offset)
+__global__ void define_fit_params(T* temp_fit_param, unsigned long long seed, unsigned long long offset, int num_neurons)
 {
     int neuron_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    curandState state;
-    curand_init(seed, neuron_idx, offset, &state);
-    start_current[neuron_idx] = curand_normal(&state);
+    if (neuron_idx < num_neurons)
+    {
+        curandState state;
+        curand_init(seed, neuron_idx, offset, &state);
+        temp_fit_param[neuron_idx] = curand_uniform(&state);
+        /*
+        if (exin[neuron_idx] == 0)
+        {
+            float ri = curand_uniform(&state);
+            temp_fit_param
+            a[neuron_idx] = 0.02 + 0.08 * ri;
+            b[neuron_idx] = 0.25 - 0.05 * ri;
+            c[neuron_idx] = -65.0;
+            d[neuron_idx] = 2;
+
+        }
+        else
+        {
+            float re = curand_uniform(&state);
+            a[neuron_idx] = 0.02;
+            b[neuron_idx] = 0.2;
+            c[neuron_idx] = -65.0 + 15 * re * re;
+            d[neuron_idx] = 8 - 6 * re * re;
+        }
+        */
+    }
 }
 
 template <typename T>
-__global__ void define_fit_params(T* temp_fit_param, unsigned long long seed, unsigned long long offset)
+__global__ void initialize_neurons(T* volt, T* rec, T* curr, bool* fire, bool* exin, T* fit_param, int num_neurons)
 {
     int neuron_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    curandState state;
-    curand_init(seed, neuron_idx, offset, &state);
-    temp_fit_param[neuron_idx] = curand_uniform(&state);
-    /*
-    if (exin[neuron_idx] == 0)
+    if (neuron_idx < num_neurons)
     {
-        float ri = curand_uniform(&state);
-        temp_fit_param
-        a[neuron_idx] = 0.02 + 0.08 * ri;
-        b[neuron_idx] = 0.25 - 0.05 * ri;
-        c[neuron_idx] = -65.0;
-        d[neuron_idx] = 2;
-
+        float b = 0.2;
+        if (exin[neuron_idx] == 0)
+        {
+            b = 0.25 - 0.05 * fit_param[neuron_idx];
+        }
+        float u = -65.0 * b; //cringe double work around
+        volt[neuron_idx] = -65.0;
+        rec[neuron_idx] = u;
+        curr[neuron_idx] = 0.0;
+        fire[neuron_idx] = 0.0;
     }
-    else
-    {
-        float re = curand_uniform(&state);
-        a[neuron_idx] = 0.02;
-        b[neuron_idx] = 0.2;
-        c[neuron_idx] = -65.0 + 15 * re * re;
-        d[neuron_idx] = 8 - 6 * re * re;
-    }
-    */
-}
-
-template <typename T>
-__global__ void initialize_neurons(T* volt, T* rec, T* curr, bool* fire, bool* exin, T* fit_param)
-{
-    int neuron_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    float b = 0.2;
-    if (exin[neuron_idx] == 0)
-    {
-        b = 0.25 - 0.05 * fit_param[neuron_idx];
-    }
-    float u = -65.0 * b; //cringe double work around
-    volt[neuron_idx] = -65.0;
-    rec[neuron_idx] = u;
-    curr[neuron_idx] = 0.0;
-    fire[neuron_idx] = 0.0;
 }
 
 template <typename T>
@@ -177,24 +200,65 @@ __global__ void define_synapses(T* rand_syn_weights, int* post_syn_idx, bool* ex
 {
     //neurons are all given as pre_synaptic
     int neuron_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    curandState state;
-    curand_init(seed, neuron_idx, offset, &state);
-
-    for (int syn_idx = 0; syn_idx < num_syns; syn_idx++)
+    if (neuron_idx < num_neurons)
     {
-        int tot_idx = neuron_idx * num_syns + syn_idx; //remember this so i can actuall reference shit later
-        post_syn_idx[tot_idx] = (int)(curand_uniform(&state) * num_neurons); //assigns the post synaptic index, far too lazy to make sure there are no repeats (really need to work on that)
-        rand_syn_weights[tot_idx] = (curand_uniform(&state)) * (exin[neuron_idx] * 2 - 1) * (1 - 0.5 * (exin[neuron_idx] == 1)); //assigns the actual synaptic weight
+        curandState state;
+        curand_init(seed, neuron_idx, offset, &state);
 
+        for (int syn_idx = 0; syn_idx < num_syns; syn_idx++)
+        {
+            int tot_idx = neuron_idx * num_syns + syn_idx; //remember this so i can actuall reference shit later
+            int potential_psi = curand(&state) % num_neurons;
+            bool used_already = false;
+            for (int j = 0; j < syn_idx; j++)
+            {
+                int compare_tot_idx = neuron_idx * num_syns + j;
+                if (post_syn_idx[compare_tot_idx] == potential_psi)
+                {
+                    used_already = true;
+                }
+            }
+            if (used_already)
+            {
+                syn_idx -= 1;
+            }
+            else
+            {
+                post_syn_idx[tot_idx] = potential_psi; //assigns the post synaptic index, far too lazy to make sure there are no repeats (really need to work on that)
+                if (exin[neuron_idx])
+                {
+                    rand_syn_weights[tot_idx] = (curand_uniform(&state)) * 0.5; //assigns the actual synaptic weight
+                }
+                else
+                {
+                    rand_syn_weights[tot_idx] = (curand_uniform(&state)) * (-1); //assigns the actual synaptic weight
+                }
+            }
+        }
     }
+}
+
+bool writeCSV(vector<vector<float>> mat)
+{
+    std::ofstream file;
+    file.open("volts.csv", ios_base::app);
+    for (auto& row : mat) {
+        for (auto col : row)
+            file << col << ',';
+        file << '\n';
+    }
+    file.close();
+
+    return true;
 }
 
 int main() {
     unsigned long long seed = 1234;  // Random seed
 
     int num_neurons = 1048576;
+    num_neurons = 1024;
     int syns_per_neur = 1023;
-    int sim_time{ 15000 };
+    int sim_time{ 1000 };
 
     // Host vector to store the result
     vector<float> h_volt(num_neurons);
@@ -204,10 +268,11 @@ int main() {
     vector<float> h_fit_param(num_neurons);
     vector<float> h_synapses(num_neurons * syns_per_neur * 2);
     vector<bool> h_exin_array(num_neurons);
+    vector<vector<float>> h_all_volts(sim_time, vector<float>(num_neurons));
 
     // Launch kernel to generate random numbers on the GPU
-    int threadsPerBlock = 128; //was formerly 256
-    int blocksPerGrid = (num_neurons + threadsPerBlock - 1) / threadsPerBlock;
+    int threadsPerBlock = 256; //was formerly 256
+    int blocksPerGrid = (num_neurons * (syns_per_neur + 1) + threadsPerBlock - 1) / threadsPerBlock;
 
     dim3 threads(threadsPerBlock, threadsPerBlock);
     dim3 blocks(blocksPerGrid, blocksPerGrid);
@@ -234,10 +299,10 @@ int main() {
     cudaMalloc((void**)&psuedo_rand_curr, num_neurons * sizeof(float));
 
     //initializing data on gpu
-    define_exin_array << <blocksPerGrid, threadsPerBlock >> > (d_exin_array, seed, 0.0);
-    define_start_curr << <blocksPerGrid, threadsPerBlock >> > (psuedo_rand_curr, seed, 0.0);
-    define_fit_params << <blocksPerGrid, threadsPerBlock >> > (d_fit_param, seed, 0.0);
-    initialize_neurons << <blocksPerGrid, threadsPerBlock >> > (d_volt, d_rec, d_curr, d_fire, d_exin_array, d_fit_param);
+    define_exin_array << <blocksPerGrid, threadsPerBlock >> > (d_exin_array, seed, 0.0, num_neurons);
+    define_start_curr << <blocksPerGrid, threadsPerBlock >> > (psuedo_rand_curr, seed, 0.0, num_neurons);
+    define_fit_params << <blocksPerGrid, threadsPerBlock >> > (d_fit_param, seed, 0.0, num_neurons);
+    initialize_neurons << <blocksPerGrid, threadsPerBlock >> > (d_volt, d_rec, d_curr, d_fire, d_exin_array, d_fit_param, num_neurons);
     define_synapses << <blocksPerGrid, threadsPerBlock >> > (d_syn_weights, d_syn_idxs, d_exin_array, num_neurons, syns_per_neur, seed, 0.0);
 
     //update the neurons with 1ms time step
@@ -246,15 +311,17 @@ int main() {
     for (int t = 0; t < sim_time; t++)
     {
         //take action brother!
-        update_neuron << <blocksPerGrid, threadsPerBlock >> > (d_volt, d_rec, d_curr, d_fire, d_exin_array, d_fit_param);
+        update_neuron << <blocksPerGrid, threadsPerBlock >> > (d_volt, d_rec, d_curr, d_fire, d_exin_array, d_fit_param, num_neurons);
         //noisy_current << <blocksPerGrid, threadsPerBlock >> > (d_curr, d_exin_array, seed, 0.0); //this is the slowest by a mile, no idea why
 
         //these two functions contribute approximately equally to the run time from what it seems
         // if i can optimize both some more i might be able to get it to true real time with a million neurons
-        psuedo_noisy_current << <blocksPerGrid, threadsPerBlock >> > (d_curr, d_exin_array, psuedo_rand_curr, t, num_neurons);
-        matrix_mul_syn_curr << <blocksPerGrid, threadsPerBlock >> > (d_curr, d_fire, d_syn_weights, d_syn_idxs, num_neurons, syns_per_neur); 
+        //psuedo_noisy_current << <blocksPerGrid, threadsPerBlock >> > (d_curr, d_exin_array, psuedo_rand_curr, t, num_neurons);
+        matrix_mul_syn_curr << <blocksPerGrid, threadsPerBlock >> > (d_curr, d_fire, d_syn_weights, d_syn_idxs, num_neurons, syns_per_neur);
+        cudaMemcpy(h_volt.data(), d_volt, num_neurons * sizeof(float), cudaMemcpyDeviceToHost);
+        h_all_volts[t] = h_volt;
     }
-    
+
 
     // Copy the result back to the host
     cudaMemcpy(h_volt.data(), d_volt, num_neurons * sizeof(float), cudaMemcpyDeviceToHost);
@@ -263,6 +330,7 @@ int main() {
     auto duration = chrono::duration_cast<chrono::seconds>(stop - start);
     cout << duration.count() << endl;
     cout << "done" << endl;
+    writeCSV(h_all_volts);
 
     // Cleanup
     cudaFree(d_volt);
