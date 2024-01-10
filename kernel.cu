@@ -6,8 +6,7 @@
 #include <fstream>
 using namespace std;
 
-template <typename T>
-__global__ void synapse_current(T* curr, bool* fire, T* syn_weights, int* post_syn_idx, int num_neurons, int num_syns)
+__global__ void synapse_current(float* curr, const bool* fire, const float* syn_weights, int* post_syn_idx, int num_neurons, int num_syns)
 {
     //this is now vestigial code :)
     int neuron_idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -25,55 +24,32 @@ __global__ void synapse_current(T* curr, bool* fire, T* syn_weights, int* post_s
 }
 
 
-template <typename T>
-__global__ void psuedo_noisy_current(T* curr, bool* exin, T* start_current, int offset, int num_neurons)
+__global__ void psuedo_noisy_current(float* curr, const bool* exin, const float* start_current, int offset, int num_neurons)
 {
-
     int neuron_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (neuron_idx < num_neurons)
     {
-        curr[neuron_idx] = (2 + (exin[neuron_idx] == 1) * 3) * start_current[((neuron_idx + offset) * (neuron_idx + offset)) % num_neurons];
+        curr[neuron_idx] = (2 + (exin[neuron_idx] == 1) * 3) * start_current[((neuron_idx + offset) * (offset)) % num_neurons];
     }
 }
 
-template <typename T>
-__global__ void update_neuron(T* volt, T* rec, T* curr, bool* fire, bool* exin, T* fit_param, int num_neurons)
+__global__ void update_neuron(float* volt, float* rec, const float* curr, bool* fire, const bool* exin, const float* fit_param, int num_neurons)
 {
-    //indexed by taking the neuron_idx + some offset
-    //neuron_idx+0 -> V
-    //neuron_idx+1 -> u
-    //neuron_idx+2 -> I
-    //neuron_idx+3 -> jF
-    //bc of this, neuron_idx counts by 4
-    //same scheme for fit parameters
+
     int neuron_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (neuron_idx < num_neurons)
     {
-        float a = 0;
-        float b = 0;
-        float c = 0;
-        float d = 0;
-        if (exin[neuron_idx] == 0)
-        {
-            a = 0.02 + 0.08 * fit_param[neuron_idx];
-            b = 0.25 - 0.05 * fit_param[neuron_idx];
-            c = -65.0;
-            d = 2;
 
-        }
-        else
-        {
-            a = 0.02;
-            b = 0.2;
-            c = -65.0 + 15 * fit_param[neuron_idx] * fit_param[neuron_idx];
-            d = 8 - 6 * fit_param[neuron_idx] * fit_param[neuron_idx];
-        }
+        float a = 0.02 + 0.08 * fit_param[neuron_idx] * !exin[neuron_idx];
+        float b = 0.25 - 0.05 * (fit_param[neuron_idx] * !exin[neuron_idx] + exin[neuron_idx]);
+        float c = -65.0 + 15 * fit_param[neuron_idx] * fit_param[neuron_idx] * exin[neuron_idx];
+        float d = 8 - 6 * (fit_param[neuron_idx] * fit_param[neuron_idx] * exin[neuron_idx] + !exin[neuron_idx]);
 
         fire[neuron_idx] = 0;
         volt[neuron_idx] += 0.5 * (0.04 * volt[neuron_idx] * volt[neuron_idx] + 5 * volt[neuron_idx] + 140 - rec[neuron_idx] + curr[neuron_idx]);
         volt[neuron_idx] += 0.5 * (0.04 * volt[neuron_idx] * volt[neuron_idx] + 5 * volt[neuron_idx] + 140 - rec[neuron_idx] + curr[neuron_idx]);
         rec[neuron_idx] += a * (b * volt[neuron_idx] - rec[neuron_idx]);
-        curr[neuron_idx] = 0;
+        //curr[neuron_idx] = 0;
         if (volt[neuron_idx] >= 30)
         {
             volt[neuron_idx] = c;
@@ -83,6 +59,7 @@ __global__ void update_neuron(T* volt, T* rec, T* curr, bool* fire, bool* exin, 
     }
     
 }
+
 
 template <typename T>
 __global__ void define_exin_array(T* temp_exin_array, unsigned long long seed, unsigned long long offset, int num_neurons)
@@ -226,10 +203,10 @@ bool writeCSV(vector<vector<float>> mat)
 int main() {
     unsigned long long seed = 1234;  // Random seed
 
-    int num_neurons = 1048576;
-    //num_neurons = 1024;
+    int num_neurons = 1 << 20;
+    num_neurons = 1024*128;
     int syns_per_neur = 999;
-    int sim_time{ 15000 };
+    int sim_time{ 10000 };
 
     // Host vector to store the result
     vector<float> h_volt(num_neurons);
@@ -280,7 +257,6 @@ int main() {
     {
         //take action brother!
         update_neuron << <blocks, threads >> > (d_volt, d_rec, d_curr, d_fire, d_exin_array, d_fit_param, num_neurons);
-
         psuedo_noisy_current << <blocks, threads >> > (d_curr, d_exin_array, psuedo_rand_curr, t, num_neurons);
         synapse_current << <blocks, threads >> > (d_curr, d_fire, d_syn_weights, d_syn_idxs, num_neurons, syns_per_neur);
  
